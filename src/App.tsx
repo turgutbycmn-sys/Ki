@@ -353,7 +353,10 @@ export default function App() {
             setIsAnalyzing(false);
             
             // Add new match to matches list
-            setMatches((prev) => [jobData.matchData!, ...prev]);
+            setMatches((prev) => {
+              if (prev.some(m => m.id === jobData.matchData!.id)) return prev;
+              return [jobData.matchData!, ...prev];
+            });
             setSelectedMatch(jobData.matchData!);
             if (jobData.matchData.highlights && jobData.matchData.highlights.length > 0) {
               setSelectedHighlight(jobData.matchData.highlights[0]);
@@ -934,7 +937,7 @@ export default function App() {
               >
                 {matches.map((m) => (
                   <option key={m.id} value={m.id}>
-                    {m.teamA.name} {m.teamA.score} - {m.teamB.score} {m.teamB.name} ({m.competition})
+                    {m.teamA?.name || "Team A"} {m.teamA?.score || 0} - {m.teamB?.score || 0} {m.teamB?.name || "Team B"} ({m.competition})
                   </option>
                 ))}
               </select>
@@ -1976,7 +1979,7 @@ export default function App() {
                 <div className="bg-rose-900/20 border border-rose-500/30 text-rose-300 rounded p-3 text-[11px] font-mono flex items-start gap-2">
                   <XCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
                   <div>
-                    <span className="font-bold">Heuristic Safe Fallback Triggered:</span>
+                    <span className="font-bold">Upload Error:</span>
                     <p className="mt-0.5 leading-relaxed">{errorMessage}</p>
                   </div>
                 </div>
