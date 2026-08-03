@@ -118,4 +118,29 @@ export interface MatchData {
     links: PassLink[];
   };
   highPressZones: { x: number; y: number; radius: number; intensity: number; team: "A" | "B" }[];
+  videoUrl?: string;
+  extractedFrames?: ExtractedFrame[];
+}
+
+export interface ExtractedFrame {
+  id: string;
+  filename: string;
+  url: string;
+  timestamp: number; // second in video
+  timeStr: string;   // e.g. "01:02"
+}
+
+export interface ProcessingJob {
+  jobId: string;
+  status: "uploading" | "probing" | "extracting_frames" | "analyzing_ai" | "completed" | "failed";
+  progress: number; // 0 to 100
+  currentStep: string;
+  videoFileName?: string;
+  videoUrl?: string;
+  videoSizeMb?: number;
+  videoDuration?: number;
+  extractedFramesCount?: number;
+  extractedFrames?: ExtractedFrame[];
+  matchData?: MatchData;
+  error?: string;
 }

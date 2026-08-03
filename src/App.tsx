@@ -32,7 +32,7 @@ import {
   XCircle,
   BarChart2
 } from "lucide-react";
-import { MatchData, HighlightSequence, FootballEvent, PlayCoordinate, TacticalStep, VeoPlayerStat } from "./types";
+import { MatchData, HighlightSequence, FootballEvent, PlayCoordinate, TacticalStep, VeoPlayerStat, ProcessingJob, ExtractedFrame } from "./types";
 
 export default function App() {
   // Application State
@@ -59,6 +59,22 @@ export default function App() {
   const [aiDate, setAiDate] = useState("");
   const [aiCommentary, setAiCommentary] = useState("");
   
+  // File objects for server upload
+  const [rawVideoFile, setRawVideoFile] = useState<File | null>(null);
+  const [rawLogFile, setRawLogFile] = useState<File | null>(null);
+
+  // Server background job processing state
+  const [processingJob, setProcessingJob] = useState<ProcessingJob | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const jobPollTimer = useRef<NodeJS.Timeout | null>(null);
+
+  // Player mode & Frame Snapshot Player state
+  const [activePlayerMode, setActivePlayerMode] = useState<"frames" | "video">("frames");
+  const [videoPlaybackBlocked, setVideoPlaybackBlocked] = useState<boolean>(false);
+  const [currentFrameTimestamp, setCurrentFrameTimestamp] = useState<number>(0);
+  const [isFrameLoopPlaying, setIsFrameLoopPlaying] = useState<boolean>(false);
+  const frameLoopTimer = useRef<NodeJS.Timeout | null>(null);
+
   // File upload state for Veo 3 System footage
   const [uploadedVideoFile, setUploadedVideoFile] = useState<{ name: string; size: string } | null>(null);
   const [uploadedLogFile, setUploadedLogFile] = useState<{ name: string; size: string } | null>(null);
@@ -78,29 +94,6 @@ export default function App() {
 
   // Interactive Filter Threshold for Highlight Score
   const [highlightThreshold, setHighlightThreshold] = useState<number>(0.75);
-
-  // Fetch session matches on load
-  useEffect(() => {
-    fetchMatches();
-  }, []);
-
-  const fetchMatches = async () => {
-    try {
-      const res = await fetch("/api/matches");
-      if (!res.ok) throw new Error("Failed to load match listings.");
-      const data = await res.json();
-      setMatches(data);
-      if (data.length > 0) {
-        setSelectedMatch(data[0]);
-        if (data[0].highlights && data[0].highlights.length > 0) {
-          setSelectedHighlight(data[0].highlights[0]);
-        }
-      }
-    } catch (err: any) {
-      console.error(err);
-      setErrorMessage("Could not connect to the full-stack server. Using local sandbox fallback.");
-    }
-  };
 
   // Helper to parse dynamic filenames
   const parseFilename = (filename: string) => {
@@ -139,32 +132,69 @@ export default function App() {
     };
   };
 
-  const generateCommentaryForVideo = (teamA: string, teamB: string, durationSeconds: number): string => {
-    const fmtTime = (s: number) => {
-      const m = Math.floor(s / 60);
-      const sec = Math.floor(s % 60);
-      return `${String(m).padStart(2, "0")}:${String(sec).padStart(2, "0")}`;
+  // Fetch session matches on load
+  useEffect(() => {
+    const fetchMatches = async () => {
+      try {
+        const res = await fetch("/api/matches");
+        if (!res.ok) throw new Error("Failed to load match listings.");
+        const data = await res.json();
+        setMatches(data);
+        if (data.length > 0) {
+          setSelectedMatch(data[0]);
+          if (data[0].highlights && data[0].highlights.length > 0) {
+            setSelectedHighlight(data[0].highlights[0]);
+          }
+        }
+      } catch (err: any) {
+        console.error("Fetch matches error:", err);
+      }
     };
+    fetchMatches();
+  }, []);
 
-    const t1 = fmtTime(durationSeconds * 0.15);
-    const t2 = fmtTime(durationSeconds * 0.45);
-    const t3 = fmtTime(durationSeconds * 0.75);
-    const t4 = fmtTime(durationSeconds * 0.90);
+  // Clean up polling and frame timers on unmount
+  useEffect(() => {
+    return () => {
+      if (jobPollTimer.current) clearInterval(jobPollTimer.current);
+      if (frameLoopTimer.current) clearInterval(frameLoopTimer.current);
+    };
+  }, []);
 
-    return (
-      `${t1} - Beautiful build-up by ${teamA}! Player #10 receives the ball in midfield, accelerates past his marker with a swift nutmeg. He drives down the right flank, cuts inside and curls a magnificent cross to Player #9 who rises above the defender to score a powerful header goal into the top left pocket!\n\n` +
-      `${t2} - Dangerous counter-attack by ${teamB}! Player #7 leads a blistering transition with teammates charging. He plays a clever backheel pass to Player #11 who takes a dangerous shot on target, but the ${teamA} goalkeeper makes an unbelievable, spectacular save, leaping sideways!\n\n` +
-      `${t3} - Solid defensive work! Player #4 triggers a synchronized team press inside ${teamB}'s box, intercepts a slow defensive pass, and instantly assists Player #8 who strikes it first-time on the volley to score a stunning goal!\n\n` +
-      `${t4} - Late drama! Player #14 recovers the ball near the half-line, performs a long solo run skipping past two defenders with world-class skill. He then delivers a low pass to Player #17 who hits the post with a dangerous shot!`
-    );
-  };
+  // Frame Loop Timer for Extracted Frame Snapshots Playback
+  useEffect(() => {
+    if (isFrameLoopPlaying && selectedMatch?.extractedFrames && selectedMatch.extractedFrames.length > 0) {
+      const maxTime = selectedMatch.extractedFrames[selectedMatch.extractedFrames.length - 1].timestamp;
+      frameLoopTimer.current = setInterval(() => {
+        setCurrentFrameTimestamp((prev) => {
+          if (prev >= maxTime) return 0;
+          return prev + 1;
+        });
+      }, 1000); // 1 second per frame snapshot
+    } else {
+      if (frameLoopTimer.current) clearInterval(frameLoopTimer.current);
+    }
+    return () => {
+      if (frameLoopTimer.current) clearInterval(frameLoopTimer.current);
+    };
+  }, [isFrameLoopPlaying, selectedMatch]);
+
+  // Sync Frame Snapshot Player timestamp whenever selected highlight changes
+  useEffect(() => {
+    if (selectedHighlight) {
+      const startSecs = getHighlightStartTime(selectedHighlight);
+      setCurrentFrameTimestamp(Math.floor(startSecs));
+      setIsFrameLoopPlaying(false);
+    }
+  }, [selectedHighlight]);
 
   // Drag and drop handlers
   const handleVideoDrop = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setIsDragOverVideo(false);
     const file = e.dataTransfer.files[0];
-    if (file && (file.type.startsWith("video/") || file.name.endsWith(".mp4") || file.name.endsWith(".mov"))) {
+    if (file) {
+      setRawVideoFile(file);
       setUploadedVideoFile({
         name: file.name,
         size: (file.size / (1024 * 1024)).toFixed(1) + " MB",
@@ -173,31 +203,15 @@ export default function App() {
       setAiMatchTitle(parsed.title);
       setAiCompetition(parsed.competition);
       setAiDate(parsed.date);
-      
-      const url = URL.createObjectURL(file);
-      setVideoSrc(url);
-
-      try {
-        const tempVideo = document.createElement("video");
-        tempVideo.preload = "metadata";
-        tempVideo.src = url;
-        tempVideo.onloadedmetadata = () => {
-          setVideoDuration(tempVideo.duration);
-          const autoComm = generateCommentaryForVideo(parsed.teamA, parsed.teamB, tempVideo.duration);
-          setAiCommentary(autoComm);
-        };
-      } catch (err: any) {
-        console.warn("Could not load video metadata via temporary DOM element:", err.message);
-        setVideoDuration(5400); // 90 min default fallback
-        const autoComm = generateCommentaryForVideo(parsed.teamA, parsed.teamB, 5400);
-        setAiCommentary(autoComm);
-      }
+      setVideoSrc(URL.createObjectURL(file));
+      setErrorMessage(null);
     }
   };
 
   const handleVideoSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setRawVideoFile(file);
       setUploadedVideoFile({
         name: file.name,
         size: (file.size / (1024 * 1024)).toFixed(1) + " MB",
@@ -206,25 +220,8 @@ export default function App() {
       setAiMatchTitle(parsed.title);
       setAiCompetition(parsed.competition);
       setAiDate(parsed.date);
-      
-      const url = URL.createObjectURL(file);
-      setVideoSrc(url);
-
-      try {
-        const tempVideo = document.createElement("video");
-        tempVideo.preload = "metadata";
-        tempVideo.src = url;
-        tempVideo.onloadedmetadata = () => {
-          setVideoDuration(tempVideo.duration);
-          const autoComm = generateCommentaryForVideo(parsed.teamA, parsed.teamB, tempVideo.duration);
-          setAiCommentary(autoComm);
-        };
-      } catch (err: any) {
-        console.warn("Could not load video metadata via temporary DOM element:", err.message);
-        setVideoDuration(5400); // 90 min default fallback
-        const autoComm = generateCommentaryForVideo(parsed.teamA, parsed.teamB, 5400);
-        setAiCommentary(autoComm);
-      }
+      setVideoSrc(URL.createObjectURL(file));
+      setErrorMessage(null);
     }
   };
 
@@ -233,6 +230,7 @@ export default function App() {
     setIsDragOverLog(false);
     const file = e.dataTransfer.files[0];
     if (file) {
+      setRawLogFile(file);
       setUploadedLogFile({
         name: file.name,
         size: (file.size / 1024).toFixed(1) + " KB",
@@ -250,6 +248,7 @@ export default function App() {
   const handleLogSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
+      setRawLogFile(file);
       setUploadedLogFile({
         name: file.name,
         size: (file.size / 1024).toFixed(1) + " KB",
@@ -264,85 +263,122 @@ export default function App() {
     }
   };
 
-  // Run Real AI / Heuristic Analysis
+  // Run Server Multipart Upload & Asynchronous FFmpeg Processing Pipeline
   const handleAnalyzeMatch = async () => {
-    let finalTitle = aiMatchTitle.trim();
-    let finalCommentary = aiCommentary.trim();
-    let finalComp = aiCompetition.trim() || "Real-life Match Play";
-    let finalDate = aiDate.trim() || new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
-
-    if (!uploadedVideoFile) {
-      setErrorMessage("Please upload a raw video footage file to begin AI analysis. Pre-configured demo simulations have been removed.");
+    if (!rawVideoFile && !uploadedVideoFile) {
+      setErrorMessage("Please select or drop a raw video file to upload and process.");
       return;
     }
 
-    if (uploadedVideoFile && !finalTitle) {
-      const parsed = parseFilename(uploadedVideoFile.name);
-      finalTitle = parsed.title;
-      finalComp = parsed.competition;
-      finalDate = parsed.date;
-    }
-
-    if (!finalTitle) {
-      finalTitle = "Real-life Football Footage";
-    }
-
-    if (!finalCommentary) {
-      const parts = finalTitle.split(/\s+vs\s+/i);
-      const teamA = parts[0] || "Home Team";
-      const teamB = parts[1] || "Away Team";
-      finalCommentary = generateCommentaryForVideo(teamA, teamB, videoDuration || 120);
+    let finalTitle = aiMatchTitle.trim();
+    if (!finalTitle && rawVideoFile) {
+      finalTitle = parseFilename(rawVideoFile.name).title;
     }
 
     setIsAnalyzing(true);
-    setLoadingStep(0);
     setErrorMessage(null);
     setSuccessMessage(null);
-
-    // Staggered loading checklist steps simulation
-    const stepInterval = setInterval(() => {
-      setLoadingStep((prev) => Math.min(prev + 1, 4));
-    }, 1800);
+    setVideoPlaybackBlocked(false);
 
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          commentary: finalCommentary,
-          matchTitle: finalTitle,
-          competition: finalComp,
-          date: finalDate,
-          videoDuration: videoDuration,
-        }),
+      const formData = new FormData();
+      if (rawVideoFile) {
+        formData.append("video", rawVideoFile);
+      }
+      if (rawLogFile) {
+        formData.append("log", rawLogFile);
+      }
+      formData.append("matchTitle", finalTitle || "Real Football Match");
+      formData.append("competition", aiCompetition || "Veo 3 Amateur League");
+      formData.append("date", aiDate || new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }));
+      formData.append("commentary", aiCommentary);
+      formData.append("frameInterval", "1.0");
+
+      setProcessingJob({
+        jobId: "init",
+        status: "uploading",
+        progress: 5,
+        currentStep: "Transferring raw video file directly to server backend...",
       });
 
-      if (!res.ok) {
-        throw new Error("Server analysis failed.");
-      }
+      // Upload via XMLHttpRequest to get real upload progress
+      const uploadRes = await new Promise<ProcessingJob>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", "/api/upload");
 
-      const newMatch: MatchData = await res.json();
-      
-      // Prepend to matches state
-      setMatches((prev) => [newMatch, ...prev]);
-      setSelectedMatch(newMatch);
-      setShowUploadPortalOverride(false);
-      setSuccessMessage("Intelligent Football Highlight analysis complete!");
-      
-      // Auto select first highlight
-      if (newMatch.highlights && newMatch.highlights.length > 0) {
-        setSelectedHighlight(newMatch.highlights[0]);
-      } else {
-        setSelectedHighlight(null);
-      }
-      
-      // Switch to highlights tab
-      setActiveTab("highlights");
+        xhr.upload.onprogress = (e) => {
+          if (e.lengthComputable) {
+            const pct = Math.floor((e.loaded / e.total) * 15);
+            setProcessingJob({
+              jobId: "init",
+              status: "uploading",
+              progress: 5 + pct,
+              currentStep: `Uploading video to server (${(e.loaded / (1024 * 1024)).toFixed(1)} MB / ${(e.total / (1024 * 1024)).toFixed(1)} MB)...`,
+            });
+          }
+        };
+
+        xhr.onload = () => {
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              const resp = JSON.parse(xhr.responseText);
+              resolve(resp.job);
+            } catch (err) {
+              reject(new Error("Invalid JSON response from upload server."));
+            }
+          } else {
+            reject(new Error(`Server upload error (HTTP ${xhr.status}): ${xhr.statusText}`));
+          }
+        };
+
+        xhr.onerror = () => reject(new Error("Network error during file upload to backend server."));
+        xhr.send(formData);
+      });
+
+      setActiveJobId(uploadRes.jobId);
+      setProcessingJob(uploadRes);
+
+      // Start polling background server job status
+      if (jobPollTimer.current) clearInterval(jobPollTimer.current);
+
+      jobPollTimer.current = setInterval(async () => {
+        try {
+          const pollRes = await fetch(`/api/jobs/${uploadRes.jobId}`);
+          if (!pollRes.ok) return;
+          const jobData: ProcessingJob = await pollRes.json();
+          setProcessingJob(jobData);
+
+          if (jobData.status === "completed" && jobData.matchData) {
+            if (jobPollTimer.current) clearInterval(jobPollTimer.current);
+            setIsAnalyzing(false);
+            
+            // Add new match to matches list
+            setMatches((prev) => [jobData.matchData!, ...prev]);
+            setSelectedMatch(jobData.matchData!);
+            if (jobData.matchData.highlights && jobData.matchData.highlights.length > 0) {
+              setSelectedHighlight(jobData.matchData.highlights[0]);
+            } else {
+              setSelectedHighlight(null);
+            }
+
+            setShowUploadPortalOverride(false);
+            setActivePlayerMode("frames"); // Default to 100% reliable frame player
+            setSuccessMessage(`Analysis complete! Server FFmpeg extracted ${jobData.extractedFramesCount || 0} high-resolution frame snapshots.`);
+            setActiveTab("highlights");
+          } else if (jobData.status === "failed") {
+            if (jobPollTimer.current) clearInterval(jobPollTimer.current);
+            setIsAnalyzing(false);
+            setErrorMessage(jobData.error || "Server FFmpeg processing failed.");
+          }
+        } catch (pollErr: any) {
+          console.warn("Job status poll error:", pollErr.message);
+        }
+      }, 750);
+
     } catch (err: any) {
-      setErrorMessage(err.message || "An unexpected error occurred during AI analysis.");
-    } finally {
-      clearInterval(stepInterval);
+      console.error("Upload error:", err);
       setIsAnalyzing(false);
+      setErrorMessage(err.message || "Failed to upload and initiate server video analysis.");
     }
   };
 
@@ -496,38 +532,80 @@ export default function App() {
 
   // Full-screen analytical progress checklist when computing real-life footage
   if (isAnalyzing) {
+    const jobProgress = processingJob?.progress || 10;
+    const currentStepMsg = processingJob?.currentStep || "Initialising server processing pipeline...";
+    const framesCount = processingJob?.extractedFramesCount || 0;
+
     return (
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-6 font-sans">
         <div className="max-w-xl w-full bg-slate-900 border border-slate-800/80 rounded-2xl p-8 shadow-2xl relative overflow-hidden">
           <div className="absolute top-0 left-0 right-0 h-1 bg-gradient-to-r from-emerald-500 via-teal-500 to-emerald-600 animate-pulse"></div>
           
-          <div className="flex items-center gap-4 mb-8">
+          <div className="flex items-center gap-4 mb-6">
             <div className="p-3 bg-emerald-500/10 rounded-xl border border-emerald-500/20 text-emerald-400">
               <Cpu className="w-8 h-8 animate-spin" />
             </div>
             <div>
               <h2 className="text-xl font-mono font-bold tracking-tight text-slate-100">
-                VEO 3 COMPUTE PIPELINE
+                SERVER FFmpeg PROCESSING PIPELINE
               </h2>
               <p className="text-slate-400 text-xs">
-                Translating real-life footage to vector coordinates & highlight scoring matrices.
+                Server-side video decoding, frame extraction & multimodal AI analysis.
               </p>
             </div>
           </div>
 
-          <div className="space-y-4 mb-8">
+          {/* Progress Bar */}
+          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 mb-6">
+            <div className="flex justify-between items-center text-xs font-mono">
+              <span className="text-slate-400 uppercase tracking-wider text-[10px]">Processing Progress</span>
+              <span className="text-emerald-400 font-bold">{jobProgress}%</span>
+            </div>
+            <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden p-0.5 border border-slate-700/50">
+              <div 
+                className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 rounded-full transition-all duration-300 shadow-sm shadow-emerald-500/50"
+                style={{ width: `${Math.max(5, jobProgress)}%` }}
+              ></div>
+            </div>
+            <p className="text-[11px] font-mono text-slate-300 pt-1 leading-snug">
+              {currentStepMsg}
+            </p>
+          </div>
+
+          <div className="space-y-3 mb-6">
             {[
-              { label: "Lens Calibration & Raw Stereo Frame Parsing", desc: "Aligning 4K stereo sensors for spatial detection" },
-              { label: "Player 2D Coaxial Coordinate Extraction", desc: "Generating field mapping paths from optical tracking" },
-              { label: "Highlight Scoring Matrix Calculation", desc: "Computing Event Importance, Tempo, & Technical Difficulty" },
-              { label: "Gemini Player Pass Network Compilation", desc: "Mapping dynamic playmaking networks from real log names" },
-              { label: "Tactical Animation Rendering & Timeline Prep", desc: "Packaging highlights for the interactive chalkboard board" }
+              {
+                label: "Raw Video Upload to Backend Storage",
+                desc: processingJob?.videoSizeMb ? `Direct server upload complete (${processingJob.videoSizeMb} MB)` : "Uploading video file...",
+                done: jobProgress >= 20
+              },
+              {
+                label: "FFmpeg Server Frame Extraction Engine",
+                desc: framesCount > 0 ? `FFmpeg extracted ${framesCount} high-res frame snapshots` : "FFmpeg probing & frame extraction...",
+                done: jobProgress >= 70
+              },
+              {
+                label: "Multimodal Gemini AI & Heuristic Analysis",
+                desc: "Evaluating frame sequences & event logs for highlight scoring",
+                done: jobProgress >= 90
+              },
+              {
+                label: "2D Veo 3 Tactical Telemetry & Replay Packaging",
+                desc: "Generating player movement vectors and field animation coordinates",
+                done: jobProgress >= 100
+              }
             ].map((step, idx) => {
-              const isCompleted = loadingStep > idx;
-              const isProcessing = loadingStep === idx;
+              const isCompleted = step.done;
+              const isProcessing = !step.done && (idx === 0 || [
+                { done: jobProgress >= 20 },
+                { done: jobProgress >= 70 },
+                { done: jobProgress >= 90 },
+                { done: jobProgress >= 100 }
+              ][idx - 1]?.done);
+
               return (
-                <div key={idx} className={`flex items-start gap-4 p-3 rounded-lg border transition-all duration-300 ${isCompleted ? "bg-emerald-950/20 border-emerald-500/20 text-emerald-400" : isProcessing ? "bg-slate-800/50 border-slate-700 text-slate-200 scale-[1.01]" : "bg-slate-900/40 border-transparent text-slate-500"}`}>
-                  <div className="mt-0.5">
+                <div key={idx} className={`flex items-start gap-3.5 p-3 rounded-lg border transition-all duration-300 ${isCompleted ? "bg-emerald-950/20 border-emerald-500/20 text-emerald-400" : isProcessing ? "bg-slate-800/50 border-slate-700 text-slate-200 scale-[1.01]" : "bg-slate-900/40 border-transparent text-slate-500"}`}>
+                  <div className="mt-0.5 flex-shrink-0">
                     {isCompleted ? (
                       <div className="w-5 h-5 rounded-full bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xs font-bold border border-emerald-500/40">✓</div>
                     ) : isProcessing ? (
@@ -538,8 +616,8 @@ export default function App() {
                       <div className="w-5 h-5 rounded-full bg-slate-800 text-slate-600 flex items-center justify-center text-xs border border-slate-700/60 font-mono">{idx + 1}</div>
                     )}
                   </div>
-                  <div>
-                    <h4 className="text-xs font-semibold tracking-tight">{step.label}</h4>
+                  <div className="min-w-0">
+                    <h4 className="text-xs font-semibold tracking-tight truncate">{step.label}</h4>
                     <p className="text-[10px] text-slate-400 mt-0.5">{step.desc}</p>
                   </div>
                 </div>
@@ -547,9 +625,12 @@ export default function App() {
             })}
           </div>
 
-          <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 flex items-center justify-between text-xs font-mono">
-            <span className="text-slate-400">STATUS:</span>
-            <span className="text-emerald-400 animate-pulse font-bold">ANALYZING FOOTAGE...</span>
+          <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 flex items-center justify-between text-xs font-mono">
+            <span className="text-slate-400 text-[10px]">SERVER ENGINE STATUS:</span>
+            <span className="text-emerald-400 animate-pulse font-bold flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500"></span>
+              {processingJob?.status ? processingJob.status.toUpperCase().replace("_", " ") : "PROCESSING..."}
+            </span>
           </div>
         </div>
       </div>
@@ -1025,37 +1106,152 @@ export default function App() {
                 <>
                   {/* REAL-LIFE FOOTAGE & DESCRIPTION GRID */}
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    {/* VIDEO PLAYER */}
+                    {/* UNIVERSAL FRAME SNAPSHOT & VIDEO PLAYER */}
                     <div className="bg-slate-950 border border-slate-800 rounded-xl p-3.5 flex flex-col gap-2.5">
                       <div className="flex items-center justify-between border-b border-slate-900 pb-2">
-                        <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase tracking-wider flex items-center gap-1.5">
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span> Live Footage Instant Replay
-                        </span>
-                        <span className="text-[9px] font-mono text-slate-500">Target Time: {selectedHighlight.matchTime}</span>
-                      </div>
-                      
-                      {videoSrc ? (
-                        <div className="relative aspect-video rounded-lg overflow-hidden bg-black border border-slate-900">
-                          <video
-                            ref={videoRef}
-                            src={videoSrc}
-                            controls
-                            className="w-full h-full object-contain"
-                            onTimeUpdate={handleVideoTimeUpdate}
-                          />
-                          <div className="absolute top-2 left-2 bg-slate-950/95 border border-slate-800 px-2 py-0.5 rounded text-[8px] font-mono text-amber-400">
-                            20s Clip Loop
-                          </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                          <span className="text-[10px] font-mono text-emerald-400 font-bold uppercase tracking-wider">
+                            Match Frame Snapshot & Video Replay
+                          </span>
                         </div>
-                      ) : (
-                        <div className="aspect-video rounded-lg border border-dashed border-slate-800 bg-slate-950/40 flex flex-col items-center justify-center text-center p-4">
-                          <Video className="w-10 h-10 text-slate-700 mb-2 animate-pulse" />
-                          <span className="text-xs text-slate-400 font-mono">Footage Offline</span>
-                          <p className="text-[9px] text-slate-600 mt-1 max-w-[180px]">Upload mp4 video to loop live highlights side-by-side!</p>
+                        <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded border border-slate-800 text-[9px] font-mono">
+                          <button
+                            type="button"
+                            onClick={() => setActivePlayerMode("frames")}
+                            className={`px-2 py-0.5 rounded ${activePlayerMode === "frames" ? "bg-emerald-500 text-slate-950 font-bold" : "text-slate-400 hover:text-slate-200"}`}
+                          >
+                            FFmpeg Frames (100% Safe)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setVideoPlaybackBlocked(false); setActivePlayerMode("video"); }}
+                            className={`px-2 py-0.5 rounded ${activePlayerMode === "video" ? "bg-emerald-500 text-slate-950 font-bold" : "text-slate-400 hover:text-slate-200"}`}
+                          >
+                            Native Video
+                          </button>
+                        </div>
+                      </div>
+
+                      {videoPlaybackBlocked && activePlayerMode === "video" && (
+                        <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 text-[9px] font-mono p-2 rounded flex items-center gap-1.5">
+                          <Info className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span>HTML5 native playback blocked/unsupported (Error Code 4). Showing server FFmpeg frame snapshots instead.</span>
                         </div>
                       )}
+                      
+                      {activePlayerMode === "frames" || videoPlaybackBlocked ? (
+                        <div className="flex flex-col gap-2">
+                          <div className="relative aspect-video rounded-lg overflow-hidden bg-black border border-slate-900 flex items-center justify-center">
+                            {selectedMatch?.extractedFrames && selectedMatch.extractedFrames.length > 0 ? (() => {
+                              const matchingFrame = selectedMatch.extractedFrames.find(f => f.timestamp === currentFrameTimestamp) || 
+                                selectedMatch.extractedFrames.reduce((prev, curr) => 
+                                  Math.abs(curr.timestamp - currentFrameTimestamp) < Math.abs(prev.timestamp - currentFrameTimestamp) ? curr : prev
+                                , selectedMatch.extractedFrames[0]);
+
+                              return (
+                                <>
+                                  <img 
+                                    src={matchingFrame.url} 
+                                    alt={`Frame at ${matchingFrame.timeStr}`}
+                                    className="w-full h-full object-contain"
+                                  />
+                                  <div className="absolute top-2 left-2 bg-slate-950/90 border border-slate-800 px-2 py-0.5 rounded text-[9px] font-mono text-emerald-400 font-bold flex items-center gap-1.5">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                                    FFmpeg Frame Snapshot • {matchingFrame.timeStr} ({matchingFrame.timestamp}s)
+                                  </div>
+                                </>
+                              );
+                            })() : (
+                              <div className="flex flex-col items-center justify-center text-center p-4">
+                                <Video className="w-8 h-8 text-slate-700 mb-1 animate-pulse" />
+                                <span className="text-xs text-slate-400 font-mono">Generating Frame Snapshots...</span>
+                                <p className="text-[9px] text-slate-600 mt-1 max-w-[200px]">Server FFmpeg extracts high-res frames automatically upon upload.</p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Frame Snapshot Player Controls */}
+                          {selectedMatch?.extractedFrames && selectedMatch.extractedFrames.length > 0 && (
+                            <div className="bg-slate-900/60 p-2 rounded-lg border border-slate-800 flex flex-col gap-1.5 font-mono text-[9px]">
+                              <div className="flex items-center justify-between gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const startSecs = Math.floor(getHighlightStartTime(selectedHighlight));
+                                    setCurrentFrameTimestamp(startSecs);
+                                  }}
+                                  className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700"
+                                >
+                                  ⏮ Highlight Start
+                                </button>
+                                <div className="flex items-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => setCurrentFrameTimestamp(prev => Math.max(0, prev - 1))}
+                                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700"
+                                  >
+                                    -1s
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsFrameLoopPlaying(!isFrameLoopPlaying)}
+                                    className={`px-3 py-1 rounded border font-bold ${isFrameLoopPlaying ? "bg-amber-500/20 border-amber-500/40 text-amber-400" : "bg-emerald-500/20 border-emerald-500/40 text-emerald-400"}`}
+                                  >
+                                    {isFrameLoopPlaying ? "⏸ Pause Snapshots" : "▶ Play Frame Loop"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCurrentFrameTimestamp(prev => prev + 1)}
+                                    className="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded border border-slate-700"
+                                  >
+                                    +1s
+                                  </button>
+                                </div>
+                              </div>
+                              <input 
+                                type="range"
+                                min={0}
+                                max={selectedMatch.extractedFrames[selectedMatch.extractedFrames.length - 1]?.timestamp || 120}
+                                value={currentFrameTimestamp}
+                                onChange={(e) => setCurrentFrameTimestamp(parseInt(e.target.value, 10))}
+                                className="w-full accent-emerald-500 bg-slate-800 h-1.5 rounded cursor-pointer"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        videoSrc ? (
+                          <div className="relative aspect-video rounded-lg overflow-hidden bg-black border border-slate-900">
+                            <video
+                              ref={videoRef}
+                              src={selectedMatch?.videoUrl || videoSrc}
+                              controls
+                              playsInline
+                              muted
+                              className="w-full h-full object-contain"
+                              onTimeUpdate={handleVideoTimeUpdate}
+                              onError={() => {
+                                console.warn("HTML5 native video error caught. Switched to FFmpeg frame snapshot mode.");
+                                setVideoPlaybackBlocked(true);
+                                setActivePlayerMode("frames");
+                              }}
+                            />
+                            <div className="absolute top-2 left-2 bg-slate-950/95 border border-slate-800 px-2 py-0.5 rounded text-[8px] font-mono text-amber-400">
+                              Native Video Loop
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="aspect-video rounded-lg border border-dashed border-slate-800 bg-slate-950/40 flex flex-col items-center justify-center text-center p-4">
+                            <Video className="w-10 h-10 text-slate-700 mb-2 animate-pulse" />
+                            <span className="text-xs text-slate-400 font-mono font-bold">Footage Offline</span>
+                            <p className="text-[9px] text-slate-600 mt-1 max-w-[180px]">Upload mp4 video to generate FFmpeg frame snapshots and side-by-side analysis!</p>
+                          </div>
+                        )
+                      )}
+                      
                       <span className="text-[9px] text-slate-500 font-mono text-center">
-                        Loops clip ({Math.floor(getHighlightStartTime(selectedHighlight))}s - {Math.floor(getHighlightEndTime(selectedHighlight, getHighlightStartTime(selectedHighlight)))}s) to match telemetry.
+                        Veo 3 Frame Stream ({Math.floor(getHighlightStartTime(selectedHighlight))}s - {Math.floor(getHighlightEndTime(selectedHighlight, getHighlightStartTime(selectedHighlight)))}s) synchronized with tactical telemetry.
                       </span>
                     </div>
 
