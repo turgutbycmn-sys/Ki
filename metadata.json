@@ -1,0 +1,6 @@
+{
+  "name": "Intelligent Football Highlight Detection System",
+  "description": "Analyze football match sequences, calculate Highlight Scores, generate premium highlights, and view Veo 3 style tactical analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
